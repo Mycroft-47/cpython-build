@@ -58,31 +58,34 @@ jobs:
         make.bat html
       shell: cmd
     
-    - name: Build MSI Installer x64
+    - name: Build MSI Installer and Bundle x64
       run: |
         cd Tools\msi
-        buildrelease.bat -x64
+        buildrelease.bat -x64 --build
       shell: cmd
     
-    - name: Find and List MSI Files
+    - name: Find and List Installer Files
       if: always()
       run: |
-        echo "Searching for MSI files..."
-        Get-ChildItem -Path . -Filter *.msi -Recurse | ForEach-Object { $_.FullName }
+        echo "Searching for installer files (.exe and .msi)..."
+        Get-ChildItem -Path . -Filter *.exe -Recurse | ForEach-Object { Write-Host "EXE: $($_.FullName)" }
+        Get-ChildItem -Path . -Filter *.msi -Recurse | ForEach-Object { Write-Host "MSI: $($_.FullName)" }
       shell: pwsh
     
-    - name: Upload x64 MSI Installer
+    - name: Upload x64 Executable Installer
       uses: actions/upload-artifact@v4
       with:
         name: python-${{ inputs.python_version }}-amd64-installer
-        path: PCbuild/amd64/en-us/*.msi
+        path: |
+          PCbuild/amd64/en-us/*.exe
+          PCbuild/amd64/en-us/*.msi
         if-no-files-found: error
     
-    - name: Upload All MSI Files (Fallback)
+    - name: Upload All Installer Files (Fallback)
       if: failure()
       uses: actions/upload-artifact@v4
       with:
-        name: all-msi-files-debug
+        name: all-installer-files-debug
         path: |
           **/*.msi
           **/*.exe
