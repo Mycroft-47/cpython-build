@@ -1,0 +1,98 @@
+name: Build CPython 3.11.13 Windows MSI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-windows-msi:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    
+    steps:
+    - name: Checkout CPython 3.11.13 Source
+      uses: actions/checkout@v4
+      with:
+        repository: python/cpython
+        ref: v3.11.13
+        fetch-depth: 1
+    
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+    
+    - name: Setup Python for Documentation Build
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install Documentation Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install sphinx blurb python-docs-theme
+    
+    - name: Install WiX Toolset
+      run: |
+        choco install wixtoolset -y
+        echo "C:\Program Files (x86)\WiX Toolset v3.11\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+    
+    - name: Download External Dependencies
+      run: |
+        cd PCbuild
+        .\get_externals.bat
+      shell: cmd
+    
+    - name: Build Python Binaries x64
+      run: |
+        cd PCbuild
+        build.bat -p x64 -c Release
+      shell: cmd
+    
+    - name: Build Python Binaries Win32
+      run: |
+        cd PCbuild
+        build.bat -p Win32 -c Release
+      shell: cmd
+    
+    - name: Build HTML Documentation
+      run: |
+        cd Doc
+        make.bat html
+      shell: cmd
+    
+    - name: Build MSI Installers
+      run: |
+        cd Tools\msi
+        buildrelease.bat -x64 -x86
+      shell: cmd
+    
+    - name: Find and List MSI Files
+      if: always()
+      run: |
+        echo "Searching for MSI files..."
+        Get-ChildItem -Path . -Filter *.msi -Recurse | ForEach-Object { $_.FullName }
+      shell: pwsh
+    
+    - name: Upload x64 MSI Installer
+      uses: actions/upload-artifact@v4
+      with:
+        name: python-3.11.13-amd64-installer
+        path: PCbuild/amd64/en-us/*.msi
+        if-no-files-found: error
+    
+    - name: Upload Win32 MSI Installer
+      uses: actions/upload-artifact@v4
+      with:
+        name: python-3.11.13-win32-installer
+        path: PCbuild/win32/en-us/*.msi
+        if-no-files-found: error
+    
+    - name: Upload All MSI Files (Fallback)
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: all-msi-files-debug
+        path: |
+          **/*.msi
+          **/*.exe
+        if-no-files-found: warn
