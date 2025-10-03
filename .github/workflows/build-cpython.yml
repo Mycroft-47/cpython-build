@@ -1,9 +1,13 @@
-name: Build CPython 3.11.13 Windows MSI
+name: Build CPython Windows x64 MSI
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
+    inputs:
+      python_version:
+        description: 'CPython version to build (e.g., 3.11.13, 3.12.5, 3.10.14)'
+        required: true
+        default: '3.11.13'
+        type: string
 
 jobs:
   build-windows-msi:
@@ -11,11 +15,11 @@ jobs:
     timeout-minutes: 120
     
     steps:
-    - name: Checkout CPython 3.11.13 Source
+    - name: Checkout CPython Source
       uses: actions/checkout@v4
       with:
         repository: python/cpython
-        ref: v3.11.13
+        ref: v${{ inputs.python_version }}
         fetch-depth: 1
     
     - name: Setup MSBuild
@@ -48,22 +52,16 @@ jobs:
         build.bat -p x64 -c Release
       shell: cmd
     
-    - name: Build Python Binaries Win32
-      run: |
-        cd PCbuild
-        build.bat -p Win32 -c Release
-      shell: cmd
-    
     - name: Build HTML Documentation
       run: |
         cd Doc
         make.bat html
       shell: cmd
     
-    - name: Build MSI Installers
+    - name: Build MSI Installer x64
       run: |
         cd Tools\msi
-        buildrelease.bat -x64 -x86
+        buildrelease.bat -x64
       shell: cmd
     
     - name: Find and List MSI Files
@@ -76,15 +74,8 @@ jobs:
     - name: Upload x64 MSI Installer
       uses: actions/upload-artifact@v4
       with:
-        name: python-3.11.13-amd64-installer
+        name: python-${{ inputs.python_version }}-amd64-installer
         path: PCbuild/amd64/en-us/*.msi
-        if-no-files-found: error
-    
-    - name: Upload Win32 MSI Installer
-      uses: actions/upload-artifact@v4
-      with:
-        name: python-3.11.13-win32-installer
-        path: PCbuild/win32/en-us/*.msi
         if-no-files-found: error
     
     - name: Upload All MSI Files (Fallback)
