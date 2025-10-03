@@ -49,7 +49,7 @@ jobs:
     - name: Build Python Binaries x64
       run: |
         cd PCbuild
-        build.bat -p x64 -c Release
+        build.bat -p x64 -c Release --pgo
       shell: cmd
     
     - name: Build HTML Documentation
