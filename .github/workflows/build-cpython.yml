@@ -1,90 +1,173 @@
-name: Build CPython Windows x64 MSI
+name: Build CPython
 
 on:
   workflow_dispatch:
     inputs:
       python_version:
-        description: 'CPython version to build (e.g., 3.11.13, 3.12.5, 3.10.14)'
+        description: "Released CPython version, e.g. 3.8.20"
         required: true
-        default: '3.11.13'
+        default: "3.12.13"
         type: string
+      target_os:
+        description: "Target platform family"
+        required: true
+        default: "windows"
+        type: choice
+        options: [windows, ubuntu, fedora]
+      optimize:
+        description: "PGO + LTO (much slower)"
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ inputs.python_version }}-${{ inputs.target_os }}
+  cancel-in-progress: false
 
 jobs:
-  build-windows-msi:
+  windows:
+    name: Windows x86-64
+    if: inputs.target_os == 'windows'
     runs-on: windows-2022
     timeout-minutes: 120
-    
+    env:
+      PlatformToolset: ''
     steps:
-    - name: Checkout CPython Source
-      uses: actions/checkout@v4
-      with:
-        repository: python/cpython
-        ref: v${{ inputs.python_version }}
-        fetch-depth: 1
-    
-    - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v2
-    
-    - name: Setup Python for Documentation Build
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    
-    - name: Install Documentation Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install sphinx blurb python-docs-theme
-    
-    - name: Install WiX Toolset
-      run: |
-        choco install wixtoolset -y
-        echo "C:\Program Files (x86)\WiX Toolset v3.11\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-    
-    - name: Download External Dependencies
-      run: |
-        cd PCbuild
-        .\get_externals.bat
-      shell: cmd
-    
-    - name: Build Python Binaries x64
-      run: |
-        cd PCbuild
-        build.bat -p x64 -c Release --pgo
-      shell: cmd
-    
-    - name: Build HTML Documentation
-      run: |
-        cd Doc
-        make.bat html
-      shell: cmd
-    
-    - name: Build MSI Installer and Bundle x64
-      run: |
-        cd Tools\msi
-        buildrelease.bat -x64 --build
-      shell: cmd
-    
-    - name: Find and List Installer Files
-      if: always()
-      run: |
-        echo "Searching for installer files (.exe and .msi)..."
-        Get-ChildItem -Path . -Filter *.exe -Recurse | ForEach-Object { Write-Host "EXE: $($_.FullName)" }
-        Get-ChildItem -Path . -Filter *.msi -Recurse | ForEach-Object { Write-Host "MSI: $($_.FullName)" }
-      shell: pwsh
-    
-    - name: Upload x64 Executable Installer
-      uses: actions/upload-artifact@v4
-      with:
-        name: python-${{ inputs.python_version }}-amd64-installer
-        path: PCbuild/amd64/en-us/python*.exe
-        if-no-files-found: error
-    
-    - name: Upload All Installer Files (Fallback)
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: all-installer-files-debug
-        path: |
-          **/*.msi
-          **/*.exe
-        if-no-files-found: warn
+      - uses: actions/checkout@v6
+        with:
+          repository: python/cpython
+          ref: v${{ inputs.python_version }}
+          fetch-depth: 1
+
+      # <=3.10 must build with v142: v143 dropped the Win7/8 runtime those versions target.
+      - name: Select toolset
+        shell: bash
+        run: '[ "$(cut -d. -f2 <<<"${{ inputs.python_version }}")" -le 10 ] && echo "PlatformToolset=v142" >> "$GITHUB_ENV" || true'
+
+      - name: Verify v142 present
+        if: env.PlatformToolset == 'v142'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (& $vswhere -latest -products * -requires Microsoft.VisualStudio.ComponentGroup.VC.Tools.142.x86.x64 -property installationPath)) {
+            throw "v142 build tools not found on this runner."
+          }
+
+      - uses: microsoft/setup-msbuild@v3
+
+      - name: Build
+        shell: cmd
+        run: |
+          cd PCbuild
+          call get_externals.bat || exit /b 1
+          call build.bat -p x64 -c Release ${{ inputs.optimize && '--pgo' || '' }} || exit /b 1
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ver = '${{ inputs.python_version }}'
+          $stage = "$env:RUNNER_TEMP\python-$ver"
+          New-Item -Force -ItemType Directory $stage, "$stage\DLLs", dist | Out-Null
+          Copy-Item PCbuild\amd64\*.exe, PCbuild\amd64\*.dll $stage
+          Copy-Item PCbuild\amd64\*.pyd "$stage\DLLs"
+          Copy-Item Lib "$stage\Lib" -Recurse
+
+          # Bundle the MSVC runtime so it runs without the VC++ redistributable installed (e.g. Win7).
+          $vc = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $crt = Get-ChildItem "$vc\VC\Redist\MSVC\*\x64\Microsoft.VC14*.CRT\vcruntime140*.dll" -ErrorAction SilentlyContinue
+          if ($crt) { $crt | Copy-Item -Destination $stage -Force } else { Write-Warning "VC runtime not bundled" }
+
+          $env:PYTHONHOME = $stage
+          & "$stage\python.exe" -m ensurepip --default-pip
+          if ($LASTEXITCODE) { throw "ensurepip failed ($LASTEXITCODE)" }
+
+          $zip = "dist\python-$ver-windows-x86_64.zip"
+          Compress-Archive $stage $zip -Force
+          "$((Get-FileHash $zip -Algorithm SHA256).Hash)  $(Split-Path $zip -Leaf)" | Set-Content dist\SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: cpython-${{ inputs.python_version }}-windows-x86_64
+          path: dist/**
+          if-no-files-found: error
+
+  linux-debian:
+    name: Linux Debian/Ubuntu x86-64
+    if: inputs.target_os == 'ubuntu'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev zlib1g-dev libbz2-dev libreadline-dev \
+            libsqlite3-dev libncurses-dev libffi-dev liblzma-dev uuid-dev tk-dev \
+            libgdbm-dev libgdbm-compat-dev xz-utils libzstd-dev
+
+      - uses: actions/checkout@v6
+        with:
+          repository: python/cpython
+          ref: v${{ inputs.python_version }}
+          fetch-depth: 1
+          path: cpython
+
+      - name: Build & package
+        run: |
+          set -euo pipefail
+          ver='${{ inputs.python_version }}'
+          prefix="$RUNNER_TEMP/python-$ver"
+          opt=$([ '${{ inputs.optimize }}' = 'true' ] && echo '--enable-optimizations --with-lto' || true)
+          cd cpython
+          ./configure --prefix="$prefix" --with-ensurepip=install $opt
+          make -j"$(nproc)"
+          make altinstall
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          tar -C "$RUNNER_TEMP" -czf "$GITHUB_WORKSPACE/dist/python-$ver-debian-ubuntu-x86_64.tar.gz" "python-$ver"
+          cd "$GITHUB_WORKSPACE/dist" && sha256sum *.tar.gz > SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: cpython-${{ inputs.python_version }}-debian-ubuntu-x86_64
+          path: dist/**
+          if-no-files-found: error
+
+  linux-fedora:
+    name: Linux Fedora/RHEL x86-64
+    if: inputs.target_os == 'fedora'
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    timeout-minutes: 120
+    steps:
+      - run: |
+          dnf -y install gcc gcc-c++ make git tar gzip xz gawk \
+            openssl-devel bzip2-devel libffi-devel zlib-devel xz-devel sqlite-devel \
+            readline-devel tk-devel gdbm-devel ncurses-devel libuuid-devel libzstd-devel
+
+      - uses: actions/checkout@v6
+        with:
+          repository: python/cpython
+          ref: v${{ inputs.python_version }}
+          fetch-depth: 1
+          path: cpython
+
+      - name: Build & package
+        run: |
+          set -euo pipefail
+          ver='${{ inputs.python_version }}'
+          prefix="$RUNNER_TEMP/python-$ver"
+          opt=$([ '${{ inputs.optimize }}' = 'true' ] && echo '--enable-optimizations --with-lto' || true)
+          cd cpython
+          ./configure --prefix="$prefix" --with-ensurepip=install $opt
+          make -j"$(nproc)"
+          make altinstall
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          tar -C "$RUNNER_TEMP" -czf "$GITHUB_WORKSPACE/dist/python-$ver-fedora-x86_64.tar.gz" "python-$ver"
+          cd "$GITHUB_WORKSPACE/dist" && sha256sum *.tar.gz > SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: cpython-${{ inputs.python_version }}-fedora-x86_64
+          path: dist/**
+          if-no-files-found: error
